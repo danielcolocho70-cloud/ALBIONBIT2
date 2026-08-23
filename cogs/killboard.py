@@ -257,8 +257,8 @@ class KillboardSetup(commands.GroupCog, group_name="killboard", group_descriptio
         interaction: discord.Interaction,
         albion_guild_id: str,
         channel_kills: discord.TextChannel,
-        server: app_commands.Choice[str] = None,
-        channel_deaths: discord.TextChannel | None = None
+        server: app_commands.Choice[str]=None,
+        channel_deaths: discord.TextChannel | None=None
     ):
         server_name = server.value if server else "europe"
         cur = db.cursor
