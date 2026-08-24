@@ -4,7 +4,10 @@ import logging
 import aiohttp
 import ast
 import json
+import os
+import tempfile
 import discord
+import edge_tts
 from contextlib import suppress
 from discord import app_commands
 from discord.ext import commands
@@ -18,13 +21,17 @@ logger = logging.getLogger(__name__)
 def _build_system_prompt() -> str:
     return (
         "Eres Rey, el asistente oficial de Albion Party Manager para Albion Online. "
-        "Responde siempre en español, de forma breve, precisa y centrada en datos reales del juego. "
+        "Responde siempre en español, con personalidad de rey cercano, seguro, ingenioso y directo. "
+        "No limites la conversación a Albion Online: responde también a saludos, bromas, preguntas absurdas, planes del clan, llamadas, roaming, opiniones y charla cotidiana. "
+        "Aunque el mensaje sea una bobada, síguelo con naturalidad y humor cuando encaje; no respondas automáticamente que no tienes datos ni rechaces una pregunta solo por no ser del juego. "
+        "Puedes dar opiniones ligeras claramente presentadas como opinión de Rey, sin fingir datos ni experiencia personal. "
         "Cuando te pregunten por builds de healer, tank o dps, responde con nombres reales de ítems del juego como Holy Staff, Cleric Hood, Cleric Robe, Cleric Gloves, Cleric Sandals, Bear Paws, Hunter Jacket, Hunter Hood, Hunter Shoes, Incubus Mace, Stone Shield, Guardian Armor, Guardian Helmet y Guardian Boots. "
         "Ejemplo de respuesta para una build de healer: 'Build T5 Healer: Holy Staff, Cleric Hood, Cleric Robe, Cleric Gloves, Cleric Sandals, Healing Potions'. "
         "Ejemplo de respuesta para una build de DPS: 'Build T6 DPS: Bear Paws, Hunter Jacket, Hunter Hood, Hunter Shoes, Poison Pots'. "
-        "No inventes ítems, roles ni nombres. Si no tienes una referencia fiable, responde que no tienes datos concretos del juego en este momento. "
+        "No inventes ítems, roles, nombres ni datos presentados como hechos. Si no tienes una referencia fiable sobre Albion, dilo brevemente y ofrece una orientación general o pide contexto. "
+        "No conviertas rumores o estereotipos sobre nacionalidad, orientación sexual u otros grupos en hechos: contesta con tacto, puedes desmontar la generalización y conserva el tono de Rey en vez de usar una negativa seca. "
         "No digas que eres ChatGPT, OpenAI, Grok, Claude ni un modelo genérico; actúa solo como Rey. "
-        "No des opiniones personales ni consejos fuera del juego. Usa frases cortas y listas cuando sea posible."
+        "Usa frases cortas y listas cuando sea útil, pero adapta la extensión al mensaje y mantén una conversación natural."
     )
 
 
@@ -82,10 +89,69 @@ class ReyChat(commands.Cog):
         self.conversations: dict[str, list[dict[str, str]]] = {}
         self.api_key = GROQ_API_KEY
         self.session = aiohttp.ClientSession() if self.api_key else None
+        self.TTS_VOICE = "es-CO-GonzaloNeural"
 
     def cog_unload(self):
         if self.session is not None and not self.session.closed:
             asyncio.create_task(self.session.close())
+        for voice_client in self.bot.voice_clients:
+            asyncio.create_task(voice_client.disconnect())
+
+    @staticmethod
+    def _is_voice_command(prompt: str) -> str | None:
+        normalized = re.sub(r"[^a-záéíóúüñ ]", " ", prompt.lower())
+        if re.search(r"\b(?:sal|salir|desconect\w*|vete|adios|adiós)\b", normalized):
+            return "leave"
+        if re.search(r"\b(?:entra|conect|únete|unete|voz|habla)\b", normalized):
+            return "join"
+        return None
+
+    async def _join_voice_channel(self, member: discord.Member):
+        voice_state = getattr(member, "voice", None)
+        channel = getattr(voice_state, "channel", None)
+        if channel is None:
+            raise RuntimeError("Debes estar en un canal de voz para llamar a Rey.")
+
+        voice_client = discord.utils.get(self.bot.voice_clients, guild=channel.guild)
+        if voice_client is not None and voice_client.is_connected():
+            if voice_client.channel != channel:
+                await voice_client.move_to(channel)
+            return voice_client
+        return await channel.connect()
+
+    async def _leave_voice_channel(self, guild: discord.Guild) -> bool:
+        voice_client = discord.utils.get(self.bot.voice_clients, guild=guild)
+        if voice_client is None:
+            return False
+        await voice_client.disconnect()
+        return True
+
+    async def _speak(self, guild: discord.Guild, text: str) -> None:
+        voice_client = discord.utils.get(self.bot.voice_clients, guild=guild)
+        if voice_client is None or not voice_client.is_connected():
+            return
+
+        audio_path = os.path.join(
+            tempfile.gettempdir(), f"rey-{guild.id}-{id(text)}.mp3"
+        )
+        try:
+            await edge_tts.Communicate(text, self.TTS_VOICE).save(audio_path)
+            if voice_client.is_playing():
+                voice_client.stop()
+            source = discord.FFmpegPCMAudio(audio_path, executable="ffmpeg")
+
+            def cleanup(error):
+                source.cleanup()
+                with suppress(OSError):
+                    os.remove(audio_path)
+                if error:
+                    logger.warning("Error reproduciendo la voz de Rey: %s", error)
+
+            voice_client.play(source, after=cleanup)
+        except Exception:
+            with suppress(OSError):
+                os.remove(audio_path)
+            raise
 
     def _clean_prompt(self, content: str) -> str:
         prompt = re.sub(r"(?i)\brey\b", "", content).strip()
@@ -369,6 +435,23 @@ class ReyChat(commands.Cog):
             return
 
         prompt = self._clean_prompt(content)
+        voice_command = self._is_voice_command(prompt)
+        if voice_command == "leave":
+            left = await self._leave_voice_channel(message.guild)
+            await message.channel.send(
+                "👑 Rey abandona el canal de voz." if left else "👑 Rey no estaba en un canal de voz."
+            )
+            await self.bot.process_commands(message)
+            return
+        if voice_command == "join":
+            try:
+                await self._join_voice_channel(message.author)
+                await message.channel.send("👑 Rey ha entrado al canal de voz.")
+            except (discord.ClientException, discord.Forbidden, RuntimeError) as exc:
+                await message.channel.send(f"⚠️ No pude entrar al canal de voz: {exc}")
+            await self.bot.process_commands(message)
+            return
+
         local_answer = self._get_build_response(prompt)
         if local_answer is not None:
             answer = local_answer
@@ -397,12 +480,33 @@ class ReyChat(commands.Cog):
         self._trim_conversation(message.channel.id)
 
         await self._send_long_message(message.channel, answer)
+        if message.guild is not None and getattr(message.author, "voice", None):
+            try:
+                await self._join_voice_channel(message.author)
+                await self._speak(message.guild, answer)
+            except (discord.ClientException, discord.Forbidden, RuntimeError, OSError) as exc:
+                logger.warning("Rey no pudo hablar en voz: %s", exc)
         await self.bot.process_commands(message)
 
     @app_commands.guilds(discord.Object(id=AFK_GUILD_ID))
     @app_commands.command(name="rey", description="Habla con Rey, el asistente del clan")
     @app_commands.describe(prompt="Escribe tu pregunta o mensaje para Rey")
     async def rey(self, interaction: discord.Interaction, prompt: str):
+        voice_command = self._is_voice_command(prompt)
+        if voice_command == "leave":
+            left = await self._leave_voice_channel(interaction.guild)
+            await interaction.response.send_message(
+                "👑 Rey abandona el canal de voz." if left else "👑 Rey no estaba en un canal de voz."
+            )
+            return
+        if voice_command == "join":
+            try:
+                await self._join_voice_channel(interaction.user)
+                await interaction.response.send_message("👑 Rey ha entrado al canal de voz.")
+            except (discord.ClientException, discord.Forbidden, RuntimeError) as exc:
+                await interaction.response.send_message(f"⚠️ No pude entrar al canal de voz: {exc}")
+            return
+
         if not self.api_key:
             await interaction.response.send_message(
                 "🤖 La IA no está configurada: falta la clave de Groq.", ephemeral=True
@@ -441,6 +545,12 @@ class ReyChat(commands.Cog):
         conversation.append({"role": "assistant", "content": answer})
         self._trim_conversation(interaction.channel.id)
         await self._send_long_message(interaction, answer)
+        if interaction.guild is not None and getattr(interaction.user, "voice", None):
+            try:
+                await self._join_voice_channel(interaction.user)
+                await self._speak(interaction.guild, answer)
+            except (discord.ClientException, discord.Forbidden, RuntimeError, OSError) as exc:
+                logger.warning("Rey no pudo hablar en voz: %s", exc)
 
     def _shorten_answer(self, text: str) -> str:
         if not text:

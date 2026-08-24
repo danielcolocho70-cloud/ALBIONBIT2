@@ -22,6 +22,21 @@ class ReyChatTests(unittest.TestCase):
         self.assertIn("Holy Staff", prompt)
         self.assertIn("Cleric Robe", prompt)
 
+    def test_system_prompt_allows_general_and_casual_conversation(self):
+        prompt = ReyChat._build_system_prompt()
+
+        self.assertIn("saludos, bromas", prompt)
+        self.assertIn("preguntas absurdas", prompt)
+        self.assertIn("planes del clan", prompt)
+        self.assertIn("No inventes ítems", prompt)
+
+    def test_voice_commands_are_detected(self):
+        chat = ReyChat.__new__(ReyChat)
+
+        self.assertEqual(chat._is_voice_command("entra rey a voz"), "join")
+        self.assertEqual(chat._is_voice_command("rey desconectate"), "leave")
+        self.assertIsNone(chat._is_voice_command("vamos a hacer roaming"))
+
     def test_get_build_response_for_healer_t4_2(self):
         chat = ReyChat.__new__(ReyChat)
         result = chat._get_build_response("dime una build para healer t4.2")
