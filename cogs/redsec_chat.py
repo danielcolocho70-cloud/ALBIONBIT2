@@ -87,6 +87,7 @@ class ReyChat(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.conversations: dict[str, list[dict[str, str]]] = {}
+        self._processed_message_ids: set[int] = set()
         self.api_key = GROQ_API_KEY
         self.session = aiohttp.ClientSession() if self.api_key else None
         self.TTS_VOICE = "es-CO-GonzaloNeural"
@@ -407,6 +408,11 @@ class ReyChat(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot:
             return
+        if message.id in self._processed_message_ids:
+            return
+        self._processed_message_ids.add(message.id)
+        if len(self._processed_message_ids) > 4096:
+            self._processed_message_ids.clear()
 
         content = message.content or ""
         if "rey" not in content.lower():
