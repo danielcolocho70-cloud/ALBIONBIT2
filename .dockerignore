@@ -1,0 +1,10 @@
+.env
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+ffmpeg.exe
+ffplay.exe
+ffprobe.exe
