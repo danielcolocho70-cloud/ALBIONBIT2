@@ -5,7 +5,9 @@ import aiohttp
 import ast
 import json
 import os
+import shutil
 import tempfile
+import time
 import discord
 import edge_tts
 from contextlib import suppress
@@ -88,6 +90,7 @@ class ReyChat(commands.Cog):
         self.bot = bot
         self.conversations: dict[str, list[dict[str, str]]] = {}
         self._processed_message_ids: set[int] = set()
+        self._recent_message_keys: dict[tuple[int, int, str], float] = {}
         self.api_key = GROQ_API_KEY
         self.session = aiohttp.ClientSession() if self.api_key else None
         self.TTS_VOICE = "es-CO-GonzaloNeural"
@@ -131,6 +134,8 @@ class ReyChat(commands.Cog):
         voice_client = discord.utils.get(self.bot.voice_clients, guild=guild)
         if voice_client is None or not voice_client.is_connected():
             return
+        if shutil.which("ffmpeg") is None:
+            raise RuntimeError("No se encontró FFmpeg en el servidor.")
 
         audio_path = os.path.join(
             tempfile.gettempdir(), f"rey-{guild.id}-{id(text)}.mp3"
@@ -415,6 +420,16 @@ class ReyChat(commands.Cog):
             self._processed_message_ids.clear()
 
         content = message.content or ""
+        message_key = (message.channel.id, message.author.id, content.strip().lower())
+        now = time.monotonic()
+        if message_key[2] and now - self._recent_message_keys.get(message_key, 0) < 8:
+            return
+        self._recent_message_keys[message_key] = now
+        self._recent_message_keys = {
+            key: timestamp
+            for key, timestamp in self._recent_message_keys.items()
+            if now - timestamp < 8
+        }
         if "rey" not in content.lower():
             await self.bot.process_commands(message)
             return
@@ -452,9 +467,14 @@ class ReyChat(commands.Cog):
         if voice_command == "join":
             try:
                 await self._join_voice_channel(message.author)
-                await message.channel.send("👑 Rey ha entrado al canal de voz.")
-            except (discord.ClientException, discord.Forbidden, RuntimeError) as exc:
+            except (discord.ClientException, discord.Forbidden, RuntimeError, OSError) as exc:
                 await message.channel.send(f"⚠️ No pude entrar al canal de voz: {exc}")
+            else:
+                await message.channel.send("👑 Rey ha entrado al canal de voz.")
+                try:
+                    await self._speak(message.guild, "Rey ha entrado al canal de voz.")
+                except (RuntimeError, OSError, aiohttp.ClientError) as exc:
+                    logger.warning("Rey entro a voz, pero no pudo hablar: %s", exc)
             await self.bot.process_commands(message)
             return
 
@@ -508,9 +528,14 @@ class ReyChat(commands.Cog):
         if voice_command == "join":
             try:
                 await self._join_voice_channel(interaction.user)
-                await interaction.response.send_message("👑 Rey ha entrado al canal de voz.")
-            except (discord.ClientException, discord.Forbidden, RuntimeError) as exc:
+            except (discord.ClientException, discord.Forbidden, RuntimeError, OSError) as exc:
                 await interaction.response.send_message(f"⚠️ No pude entrar al canal de voz: {exc}")
+            else:
+                await interaction.response.send_message("👑 Rey ha entrado al canal de voz.")
+                try:
+                    await self._speak(interaction.guild, "Rey ha entrado al canal de voz.")
+                except (RuntimeError, OSError, aiohttp.ClientError) as exc:
+                    logger.warning("Rey entro a voz, pero no pudo hablar: %s", exc)
             return
 
         if not self.api_key:
