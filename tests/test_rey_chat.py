@@ -39,12 +39,11 @@ class ReyChatTests(unittest.TestCase):
         self.assertEqual(chat._is_voice_command("rey deja de escuchar"), "listen_leave")
         self.assertIsNone(chat._is_voice_command("vamos a hacer roaming"))
 
-    def test_voice_wake_word_accepts_common_transcription_variants(self):
-        from cogs.redsec_chat import VOICE_WAKE_PATTERN
+    def test_voice_prompt_does_not_require_wake_word(self):
+        chat = ReyChat.__new__(ReyChat)
 
-        self.assertIsNotNone(VOICE_WAKE_PATTERN.search("Rey, me escuchas"))
-        self.assertIsNotNone(VOICE_WAKE_PATTERN.search("Hey, me escuchas"))
-        self.assertIsNotNone(VOICE_WAKE_PATTERN.search("Rei, responde"))
+        self.assertEqual(chat._clean_prompt("¿qué build me recomiendas?"), "¿qué build me recomiendas?")
+        self.assertEqual(chat._clean_prompt("Rey, ¿qué build me recomiendas?"), "¿qué build me recomiendas?")
 
     def test_get_build_response_for_healer_t4_2(self):
         chat = ReyChat.__new__(ReyChat)

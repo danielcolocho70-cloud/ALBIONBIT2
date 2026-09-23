@@ -58,7 +58,7 @@ VOICE_MIN_AUDIO_SECONDS = 0.45
 VOICE_MAX_AUDIO_SECONDS = 8
 VOICE_RMS_THRESHOLD = 450
 GROQ_TRANSCRIPTION_MODEL = "whisper-large-v3-turbo"
-VOICE_REQUIRE_WAKE_WORD = False
+# Kept for compatibility with integrations that import the old wake-word pattern.
 VOICE_WAKE_PATTERN = re.compile(r"\b(?:rey|rei|hey)\b", re.IGNORECASE)
 
 BUILD_RESPONSES = {
@@ -243,9 +243,6 @@ class ReyChat(commands.Cog):
     def _capture_voice_data(self, guild_id: int, user: discord.User | None, pcm: bytes) -> None:
         if user is None or getattr(user, "bot", False) or not pcm or self._voice_loop is None:
             return
-        voice_client = discord.utils.get(self.bot.voice_clients, guild__id=guild_id)
-        if voice_client is not None and voice_client.is_playing():
-            return
         pcm = bytes(pcm)
         try:
             loudness = audioop.rms(pcm, VOICE_SAMPLE_WIDTH)
@@ -322,12 +319,15 @@ class ReyChat(commands.Cog):
             logger.info("Transcripción de voz recibida: %s", transcript or "<vacía>")
             if not transcript:
                 return
-            if VOICE_REQUIRE_WAKE_WORD:
-                wake_match = VOICE_WAKE_PATTERN.search(transcript)
-                if not wake_match:
-                    logger.info("Turno de voz ignorado: no se detectó la palabra Rey")
-                    return
-                transcript = f"Rey{transcript[wake_match.end():]}"
+            voice_command = self._is_voice_command(transcript)
+            if voice_command == "listen_leave":
+                self._stop_voice_listener(guild_id)
+                return
+            if voice_command == "leave":
+                guild = self.bot.get_guild(guild_id)
+                if guild is not None:
+                    await self._leave_voice_channel(guild)
+                return
             prompt = self._clean_prompt(transcript)
             channel = self._voice_text_channels.get(guild_id)
             if channel is None:
@@ -379,6 +379,7 @@ class ReyChat(commands.Cog):
 
     def _clean_prompt(self, content: str) -> str:
         prompt = re.sub(r"(?i)\brey\b", "", content).strip()
+        prompt = re.sub(r"^[\s,;:¡!]+|[\s,;:¡!]+$", "", prompt)
         return prompt or "Hola"
 
     def _sanitize_answer(self, text: str) -> str:
@@ -711,7 +712,7 @@ class ReyChat(commands.Cog):
                 await message.channel.send(f"⚠️ No pude entrar al canal de voz: {exc}")
             else:
                 await message.channel.send(
-                    "👑 Rey ha entrado y está escuchando. Háblame diciendo 'Rey' seguido de tu pregunta."
+                    "👑 Rey ha entrado y está escuchando. Háblame cuando quieras; no necesitas decir 'Rey'."
                 )
                 try:
                     await self._speak(message.guild, "Rey ha entrado y está escuchando.")
@@ -773,7 +774,7 @@ class ReyChat(commands.Cog):
                 await interaction.response.send_message(f"⚠️ No pude activar la escucha: {exc}")
             else:
                 await interaction.response.send_message(
-                    "👑 Rey está escuchando. Di 'Rey' seguido de tu pregunta; puedes decir 'Rey deja de escuchar' para apagarlo."
+                    "👑 Rey está escuchando. Háblame cuando quieras; puedes decir 'deja de escuchar' para apagarlo."
                 )
                 try:
                     await self._speak(interaction.guild, "Rey está escuchando.")
@@ -794,7 +795,7 @@ class ReyChat(commands.Cog):
                 await interaction.response.send_message(f"⚠️ No pude entrar al canal de voz: {exc}")
             else:
                 await interaction.response.send_message(
-                    "👑 Rey ha entrado y está escuchando. Háblame diciendo 'Rey' seguido de tu pregunta."
+                    "👑 Rey ha entrado y está escuchando. Háblame cuando quieras; no necesitas decir 'Rey'."
                 )
                 try:
                     await self._speak(interaction.guild, "Rey ha entrado y está escuchando.")
