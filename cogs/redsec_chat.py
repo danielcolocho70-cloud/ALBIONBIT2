@@ -172,8 +172,10 @@ class ReyChat(commands.Cog):
                     lambda user, data: self._capture_voice_data(guild_id, user, data)
                 )
                 voice_client.listen(sink)
+                if not voice_client.is_listening():
+                    raise RuntimeError("El receptor de voz no quedó escuchando.")
                 self._voice_sinks[guild_id] = sink
-                logger.info("Escucha de voz activada en guild %s, canal %s", guild_id, channel.id)
+                logger.warning("REY_LISTENER_READY guild=%s channel=%s", guild_id, channel.id)
             return voice_client
 
     async def _leave_voice_channel(self, guild: discord.Guild) -> bool:
