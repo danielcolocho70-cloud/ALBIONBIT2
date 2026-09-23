@@ -164,6 +164,11 @@ class ReyChat(commands.Cog):
                     voice_client = await channel.connect()
 
             if receive:
+                await channel.guild.change_voice_state(
+                    channel=channel,
+                    self_mute=False,
+                    self_deaf=False,
+                )
                 self._voice_loop = asyncio.get_running_loop()
                 old_sink = self._voice_sinks.get(guild_id)
                 if old_sink is not None:
