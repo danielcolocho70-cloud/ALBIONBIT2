@@ -106,6 +106,7 @@ class ReyChat(commands.Cog):
         self._voice_buffers: dict[tuple[int, int], bytearray] = {}
         self._voice_flush_tasks: dict[tuple[int, int], asyncio.Task] = {}
         self._voice_last_audio: dict[tuple[int, int], float] = {}
+        self._voice_logged_users: set[tuple[int, int]] = set()
         self._voice_text_channels: dict[int, discord.abc.Messageable] = {}
         self._voice_loop: asyncio.AbstractEventLoop | None = None
         self.api_key = GROQ_API_KEY
@@ -164,6 +165,7 @@ class ReyChat(commands.Cog):
             )
             voice_client.listen(sink)
             self._voice_sinks[channel.guild.id] = sink
+            logger.info("Escucha de voz activada en guild %s, canal %s", channel.guild.id, channel.id)
         return voice_client
 
     async def _leave_voice_channel(self, guild: discord.Guild) -> bool:
@@ -179,6 +181,9 @@ class ReyChat(commands.Cog):
         if isinstance(voice_client, voice_recv.VoiceRecvClient):
             voice_client.stop_listening()
         self._voice_sinks.pop(guild_id, None)
+        self._voice_logged_users = {
+            key for key in self._voice_logged_users if key[0] != guild_id
+        }
         for key, task in list(self._voice_flush_tasks.items()):
             if key[0] == guild_id:
                 task.cancel()
@@ -196,6 +201,10 @@ class ReyChat(commands.Cog):
             return
         if loudness < VOICE_RMS_THRESHOLD:
             return
+        audio_key = (guild_id, user.id)
+        if audio_key not in self._voice_logged_users:
+            self._voice_logged_users.add(audio_key)
+            logger.info("Primer audio recibido de %s en guild %s", user, guild_id)
         self._voice_loop.call_soon_threadsafe(
             self._append_voice_audio, guild_id, user.id, pcm
         )

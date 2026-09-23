@@ -1,9 +1,15 @@
 import asyncio
+import logging
 import discord
 from discord.ext import commands
 from config import TOKEN
 from database.database import db
 from cogs.afk import AFK_GUILD_ID
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 if not TOKEN:
     raise RuntimeError("Falta el token de Discord. Define DISCORD_TOKEN o TOKEN en el entorno o .env")
