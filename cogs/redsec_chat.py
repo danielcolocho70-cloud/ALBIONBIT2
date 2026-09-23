@@ -98,31 +98,20 @@ class ReyVoiceSink(voice_recv.AudioSink):
     def __init__(self, on_pcm):
         super().__init__()
         self._on_pcm = on_pcm
-        self._decoders: dict[int, discord.opus.Decoder] = {}
-        self._corrupt_users: set[int] = set()
 
     def wants_opus(self) -> bool:
-        return True
+        return False
 
     def write(self, user, data) -> None:
         if user is None or getattr(user, "bot", False):
             return
-        opus = data.opus
-        if not opus:
-            return
-        decoder = self._decoders.setdefault(user.id, discord.opus.Decoder())
-        try:
-            pcm = decoder.decode(opus, fec=False)
-        except discord.opus.OpusError:
-            if user.id not in self._corrupt_users:
-                self._corrupt_users.add(user.id)
-                logger.warning("Paquete Opus corrupto ignorado para %s", user)
+        pcm = data.pcm
+        if not pcm:
             return
         self._on_pcm(user, pcm)
 
     def cleanup(self) -> None:
-        self._decoders.clear()
-        self._corrupt_users.clear()
+        return
 
 
 class ReyChat(commands.Cog):
