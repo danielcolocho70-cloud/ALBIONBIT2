@@ -109,6 +109,7 @@ class ReyChat(commands.Cog):
         self._voice_logged_users: set[tuple[int, int]] = set()
         self._voice_text_channels: dict[int, discord.abc.Messageable] = {}
         self._voice_loop: asyncio.AbstractEventLoop | None = None
+        self._voice_connect_locks: dict[int, asyncio.Lock] = {}
         self.api_key = GROQ_API_KEY
         self.session = aiohttp.ClientSession() if self.api_key else None
         self.TTS_VOICE = "es-CO-GonzaloNeural"
@@ -140,33 +141,40 @@ class ReyChat(commands.Cog):
         if channel is None:
             raise RuntimeError("Debes estar en un canal de voz para llamar a Rey.")
 
-        voice_client = discord.utils.get(self.bot.voice_clients, guild=channel.guild)
-        if voice_client is not None and voice_client.is_connected():
-            if receive and not isinstance(voice_client, voice_recv.VoiceRecvClient):
-                await voice_client.disconnect()
+        guild_id = channel.guild.id
+        lock = self._voice_connect_locks.setdefault(guild_id, asyncio.Lock())
+        async with lock:
+            voice_client = discord.utils.get(self.bot.voice_clients, guild=channel.guild)
+            if voice_client is not None and not voice_client.is_connected():
+                with suppress(discord.ClientException):
+                    await voice_client.disconnect(force=True)
                 voice_client = None
-            elif not receive and isinstance(voice_client, voice_recv.VoiceRecvClient):
-                await voice_client.move_to(channel)
-            if voice_client is not None and voice_client.channel != channel:
-                await voice_client.move_to(channel)
-        if voice_client is None:
-            if receive:
-                voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
-            else:
-                voice_client = await channel.connect()
+            if voice_client is not None:
+                if receive and not isinstance(voice_client, voice_recv.VoiceRecvClient):
+                    await voice_client.disconnect()
+                    voice_client = None
+                elif not receive and isinstance(voice_client, voice_recv.VoiceRecvClient):
+                    await voice_client.move_to(channel)
+                if voice_client is not None and voice_client.channel != channel:
+                    await voice_client.move_to(channel)
+            if voice_client is None:
+                if receive:
+                    voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
+                else:
+                    voice_client = await channel.connect()
 
-        if receive:
-            self._voice_loop = asyncio.get_running_loop()
-            old_sink = self._voice_sinks.get(channel.guild.id)
-            if old_sink is not None:
-                voice_client.stop_listening()
-            sink = voice_recv.BasicSink(
-                lambda user, data: self._capture_voice_data(channel.guild.id, user, data)
-            )
-            voice_client.listen(sink)
-            self._voice_sinks[channel.guild.id] = sink
-            logger.info("Escucha de voz activada en guild %s, canal %s", channel.guild.id, channel.id)
-        return voice_client
+            if receive:
+                self._voice_loop = asyncio.get_running_loop()
+                old_sink = self._voice_sinks.get(guild_id)
+                if old_sink is not None:
+                    voice_client.stop_listening()
+                sink = voice_recv.BasicSink(
+                    lambda user, data: self._capture_voice_data(guild_id, user, data)
+                )
+                voice_client.listen(sink)
+                self._voice_sinks[guild_id] = sink
+                logger.info("Escucha de voz activada en guild %s, canal %s", guild_id, channel.id)
+            return voice_client
 
     async def _leave_voice_channel(self, guild: discord.Guild) -> bool:
         self._stop_voice_listener(guild.id)
