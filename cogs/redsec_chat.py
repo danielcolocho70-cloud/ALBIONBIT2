@@ -258,6 +258,7 @@ class ReyChat(commands.Cog):
     async def _process_voice_turn(self, guild_id: int, pcm: bytes) -> None:
         try:
             transcript = await self._transcribe_voice(pcm)
+            logger.info("Transcripción de voz recibida: %s", transcript or "<vacía>")
             if not transcript or not re.search(r"\brey\b", transcript, re.IGNORECASE):
                 return
             prompt = self._clean_prompt(transcript)
@@ -277,6 +278,8 @@ class ReyChat(commands.Cog):
             await self._speak(channel.guild, answer)
         except (RuntimeError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
             logger.warning("Rey no pudo procesar el turno de voz: %s", exc)
+        except Exception:
+            logger.exception("Error inesperado procesando un turno de voz de Rey")
 
     async def _speak(self, guild: discord.Guild, text: str) -> None:
         voice_client = discord.utils.get(self.bot.voice_clients, guild=guild)
@@ -635,13 +638,16 @@ class ReyChat(commands.Cog):
             return
         if voice_command == "join":
             try:
-                await self._join_voice_channel(message.author)
+                await self._join_voice_channel(message.author, receive=True)
+                self._voice_text_channels[message.guild.id] = message.channel
             except (discord.ClientException, discord.Forbidden, RuntimeError, OSError) as exc:
                 await message.channel.send(f"⚠️ No pude entrar al canal de voz: {exc}")
             else:
-                await message.channel.send("👑 Rey ha entrado al canal de voz.")
+                await message.channel.send(
+                    "👑 Rey ha entrado y está escuchando. Háblame diciendo 'Rey' seguido de tu pregunta."
+                )
                 try:
-                    await self._speak(message.guild, "Rey ha entrado al canal de voz.")
+                    await self._speak(message.guild, "Rey ha entrado y está escuchando.")
                 except (RuntimeError, OSError, aiohttp.ClientError) as exc:
                     logger.warning("Rey entro a voz, pero no pudo hablar: %s", exc)
             await self.bot.process_commands(message)
@@ -715,13 +721,16 @@ class ReyChat(commands.Cog):
             return
         if voice_command == "join":
             try:
-                await self._join_voice_channel(interaction.user)
+                await self._join_voice_channel(interaction.user, receive=True)
+                self._voice_text_channels[interaction.guild.id] = interaction.channel
             except (discord.ClientException, discord.Forbidden, RuntimeError, OSError) as exc:
                 await interaction.response.send_message(f"⚠️ No pude entrar al canal de voz: {exc}")
             else:
-                await interaction.response.send_message("👑 Rey ha entrado al canal de voz.")
+                await interaction.response.send_message(
+                    "👑 Rey ha entrado y está escuchando. Háblame diciendo 'Rey' seguido de tu pregunta."
+                )
                 try:
-                    await self._speak(interaction.guild, "Rey ha entrado al canal de voz.")
+                    await self._speak(interaction.guild, "Rey ha entrado y está escuchando.")
                 except (RuntimeError, OSError, aiohttp.ClientError) as exc:
                     logger.warning("Rey entro a voz, pero no pudo hablar: %s", exc)
             return
