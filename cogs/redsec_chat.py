@@ -243,6 +243,9 @@ class ReyChat(commands.Cog):
     def _capture_voice_data(self, guild_id: int, user: discord.User | None, pcm: bytes) -> None:
         if user is None or getattr(user, "bot", False) or not pcm or self._voice_loop is None:
             return
+        voice_client = discord.utils.get(self.bot.voice_clients, guild__id=guild_id)
+        if voice_client is not None and voice_client.is_playing():
+            return
         pcm = bytes(pcm)
         try:
             loudness = audioop.rms(pcm, VOICE_SAMPLE_WIDTH)
