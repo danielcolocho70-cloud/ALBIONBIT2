@@ -58,6 +58,7 @@ VOICE_MIN_AUDIO_SECONDS = 0.45
 VOICE_MAX_AUDIO_SECONDS = 8
 VOICE_RMS_THRESHOLD = 450
 GROQ_TRANSCRIPTION_MODEL = "whisper-large-v3-turbo"
+VOICE_REQUIRE_WAKE_WORD = False
 VOICE_WAKE_PATTERN = re.compile(r"\b(?:rey|rei|hey)\b", re.IGNORECASE)
 
 BUILD_RESPONSES = {
@@ -242,6 +243,9 @@ class ReyChat(commands.Cog):
     def _capture_voice_data(self, guild_id: int, user: discord.User | None, pcm: bytes) -> None:
         if user is None or getattr(user, "bot", False) or not pcm or self._voice_loop is None:
             return
+        voice_client = discord.utils.get(self.bot.voice_clients, guild__id=guild_id)
+        if voice_client is not None and voice_client.is_playing():
+            return
         pcm = bytes(pcm)
         try:
             loudness = audioop.rms(pcm, VOICE_SAMPLE_WIDTH)
@@ -316,11 +320,14 @@ class ReyChat(commands.Cog):
         try:
             transcript = await self._transcribe_voice(pcm)
             logger.info("Transcripción de voz recibida: %s", transcript or "<vacía>")
-            wake_match = VOICE_WAKE_PATTERN.search(transcript)
-            if not wake_match:
-                logger.info("Turno de voz ignorado: no se detectó la palabra Rey")
+            if not transcript:
                 return
-            transcript = f"Rey{transcript[wake_match.end():]}"
+            if VOICE_REQUIRE_WAKE_WORD:
+                wake_match = VOICE_WAKE_PATTERN.search(transcript)
+                if not wake_match:
+                    logger.info("Turno de voz ignorado: no se detectó la palabra Rey")
+                    return
+                transcript = f"Rey{transcript[wake_match.end():]}"
             prompt = self._clean_prompt(transcript)
             channel = self._voice_text_channels.get(guild_id)
             if channel is None:
