@@ -30,7 +30,14 @@ async def on_ready():
     print("=" * 40)
 
     synced = await bot.tree.sync()
-    afk_synced = await bot.tree.sync(guild=discord.Object(id=AFK_GUILD_ID))
+    try:
+        afk_synced = await bot.tree.sync(guild=discord.Object(id=AFK_GUILD_ID))
+    except discord.Forbidden:
+        logging.getLogger(__name__).warning(
+            "No se pudieron sincronizar comandos en la guild AFK %s: acceso denegado",
+            AFK_GUILD_ID,
+        )
+        afk_synced = []
 
     print(f"Slash Commands globales: {len(synced)} | AFK: {len(afk_synced)}")
 
