@@ -35,6 +35,8 @@ class ReyChatTests(unittest.TestCase):
 
         self.assertEqual(chat._is_voice_command("entra rey a voz"), "join")
         self.assertEqual(chat._is_voice_command("rey desconectate"), "leave")
+        self.assertEqual(chat._is_voice_command("rey escucha"), "listen_join")
+        self.assertEqual(chat._is_voice_command("rey deja de escuchar"), "listen_leave")
         self.assertIsNone(chat._is_voice_command("vamos a hacer roaming"))
 
     def test_get_build_response_for_healer_t4_2(self):

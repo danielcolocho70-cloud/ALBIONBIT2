@@ -4,15 +4,18 @@ import logging
 import aiohttp
 import ast
 import json
+import io
 import os
 import shutil
 import tempfile
 import time
+import wave
 import discord
 import edge_tts
+import audioop
 from contextlib import suppress
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, voice_recv
 
 from cogs.afk import AFK_GUILD_ID
 from config import GROQ_API_KEY, GROQ_MODEL, GROQ_MODEL_FALLBACKS, GROQ_API_URL
@@ -47,6 +50,14 @@ MAX_HISTORY_MESSAGES = 12
 MAX_TOKENS = 300
 MAX_RESPONSE_CHARS = 800
 DISCORD_MAX_MESSAGE_LENGTH = 2000
+VOICE_SAMPLE_RATE = 48000
+VOICE_CHANNELS = 2
+VOICE_SAMPLE_WIDTH = 2
+VOICE_SILENCE_SECONDS = 0.65
+VOICE_MIN_AUDIO_SECONDS = 0.45
+VOICE_MAX_AUDIO_SECONDS = 8
+VOICE_RMS_THRESHOLD = 450
+GROQ_TRANSCRIPTION_MODEL = "whisper-large-v3-turbo"
 
 BUILD_RESPONSES = {
     "healer": (
@@ -91,6 +102,12 @@ class ReyChat(commands.Cog):
         self.conversations: dict[str, list[dict[str, str]]] = {}
         self._processed_message_ids: set[int] = set()
         self._recent_message_keys: dict[tuple[int, int, str], float] = {}
+        self._voice_sinks: dict[int, voice_recv.AudioSink] = {}
+        self._voice_buffers: dict[tuple[int, int], bytearray] = {}
+        self._voice_flush_tasks: dict[tuple[int, int], asyncio.Task] = {}
+        self._voice_last_audio: dict[tuple[int, int], float] = {}
+        self._voice_text_channels: dict[int, discord.abc.Messageable] = {}
+        self._voice_loop: asyncio.AbstractEventLoop | None = None
         self.api_key = GROQ_API_KEY
         self.session = aiohttp.ClientSession() if self.api_key else None
         self.TTS_VOICE = "es-CO-GonzaloNeural"
@@ -100,17 +117,23 @@ class ReyChat(commands.Cog):
             asyncio.create_task(self.session.close())
         for voice_client in self.bot.voice_clients:
             asyncio.create_task(voice_client.disconnect())
+        for task in self._voice_flush_tasks.values():
+            task.cancel()
 
     @staticmethod
     def _is_voice_command(prompt: str) -> str | None:
         normalized = re.sub(r"[^a-záéíóúüñ ]", " ", prompt.lower())
+        if re.search(r"\b(?:deja de escuchar|deja de oír|deja de oir|silencio|para de escuchar)\b", normalized):
+            return "listen_leave"
+        if re.search(r"\b(?:escucha|escuchar|oye|oír|oir)\b", normalized):
+            return "listen_join"
         if re.search(r"\b(?:sal|salir|desconect\w*|vete|adios|adiós)\b", normalized):
             return "leave"
         if re.search(r"\b(?:entra|conect|únete|unete|voz|habla)\b", normalized):
             return "join"
         return None
 
-    async def _join_voice_channel(self, member: discord.Member):
+    async def _join_voice_channel(self, member: discord.Member, *, receive: bool=False):
         voice_state = getattr(member, "voice", None)
         channel = getattr(voice_state, "channel", None)
         if channel is None:
@@ -118,17 +141,142 @@ class ReyChat(commands.Cog):
 
         voice_client = discord.utils.get(self.bot.voice_clients, guild=channel.guild)
         if voice_client is not None and voice_client.is_connected():
-            if voice_client.channel != channel:
+            if receive and not isinstance(voice_client, voice_recv.VoiceRecvClient):
+                await voice_client.disconnect()
+                voice_client = None
+            elif not receive and isinstance(voice_client, voice_recv.VoiceRecvClient):
                 await voice_client.move_to(channel)
-            return voice_client
-        return await channel.connect()
+            if voice_client is not None and voice_client.channel != channel:
+                await voice_client.move_to(channel)
+        if voice_client is None:
+            if receive:
+                voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
+            else:
+                voice_client = await channel.connect()
+
+        if receive:
+            self._voice_loop = asyncio.get_running_loop()
+            old_sink = self._voice_sinks.get(channel.guild.id)
+            if old_sink is not None:
+                voice_client.stop_listening()
+            sink = voice_recv.BasicSink(
+                lambda user, data: self._capture_voice_data(channel.guild.id, user, data)
+            )
+            voice_client.listen(sink)
+            self._voice_sinks[channel.guild.id] = sink
+        return voice_client
 
     async def _leave_voice_channel(self, guild: discord.Guild) -> bool:
+        self._stop_voice_listener(guild.id)
         voice_client = discord.utils.get(self.bot.voice_clients, guild=guild)
         if voice_client is None:
             return False
         await voice_client.disconnect()
         return True
+
+    def _stop_voice_listener(self, guild_id: int) -> None:
+        voice_client = discord.utils.get(self.bot.voice_clients, guild__id=guild_id)
+        if isinstance(voice_client, voice_recv.VoiceRecvClient):
+            voice_client.stop_listening()
+        self._voice_sinks.pop(guild_id, None)
+        for key, task in list(self._voice_flush_tasks.items()):
+            if key[0] == guild_id:
+                task.cancel()
+                self._voice_flush_tasks.pop(key, None)
+                self._voice_buffers.pop(key, None)
+                self._voice_last_audio.pop(key, None)
+
+    def _capture_voice_data(self, guild_id: int, user: discord.User | None, data) -> None:
+        if user is None or getattr(user, "bot", False) or not data.pcm or self._voice_loop is None:
+            return
+        pcm = bytes(data.pcm)
+        try:
+            loudness = audioop.rms(pcm, VOICE_SAMPLE_WIDTH)
+        except audioop.error:
+            return
+        if loudness < VOICE_RMS_THRESHOLD:
+            return
+        self._voice_loop.call_soon_threadsafe(
+            self._append_voice_audio, guild_id, user.id, pcm
+        )
+
+    def _append_voice_audio(self, guild_id: int, user_id: int, pcm: bytes) -> None:
+        key = (guild_id, user_id)
+        buffer = self._voice_buffers.setdefault(key, bytearray())
+        max_bytes = VOICE_MAX_AUDIO_SECONDS * VOICE_SAMPLE_RATE * VOICE_CHANNELS * VOICE_SAMPLE_WIDTH
+        buffer.extend(pcm)
+        if len(buffer) > max_bytes:
+            del buffer[:-max_bytes]
+        self._voice_last_audio[key] = asyncio.get_running_loop().time()
+        task = self._voice_flush_tasks.get(key)
+        if task is None or task.done():
+            self._voice_flush_tasks[key] = asyncio.create_task(
+                self._flush_voice_after_pause(key)
+            )
+
+    async def _flush_voice_after_pause(self, key: tuple[int, int]) -> None:
+        try:
+            while True:
+                elapsed = asyncio.get_running_loop().time() - self._voice_last_audio.get(key, 0)
+                remaining = VOICE_SILENCE_SECONDS - elapsed
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(remaining)
+            pcm = bytes(self._voice_buffers.pop(key, b""))
+            self._voice_last_audio.pop(key, None)
+            minimum = VOICE_MIN_AUDIO_SECONDS * VOICE_SAMPLE_RATE * VOICE_CHANNELS * VOICE_SAMPLE_WIDTH
+            if len(pcm) >= minimum:
+                asyncio.create_task(self._process_voice_turn(key[0], pcm))
+        except asyncio.CancelledError:
+            return
+        finally:
+            self._voice_flush_tasks.pop(key, None)
+
+    async def _transcribe_voice(self, pcm: bytes) -> str:
+        if self.session is None:
+            raise RuntimeError("Falta la sesión HTTP para Groq.")
+        audio = io.BytesIO()
+        with wave.open(audio, "wb") as wav_file:
+            wav_file.setnchannels(VOICE_CHANNELS)
+            wav_file.setsampwidth(VOICE_SAMPLE_WIDTH)
+            wav_file.setframerate(VOICE_SAMPLE_RATE)
+            wav_file.writeframes(pcm)
+        form = aiohttp.FormData()
+        form.add_field("file", audio.getvalue(), filename="voice.wav", content_type="audio/wav")
+        form.add_field("model", GROQ_TRANSCRIPTION_MODEL)
+        form.add_field("language", "es")
+        form.add_field("response_format", "json")
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        endpoint = GROQ_API_URL.replace("/chat/completions", "/audio/transcriptions")
+        async with self.session.post(endpoint, data=form, headers=headers, timeout=60) as response:
+            body = await response.text()
+            if response.status != 200:
+                raise RuntimeError(f"Groq STT {response.status}: {body[:300]}")
+            payload = json.loads(body)
+        return str(payload.get("text", "")).strip()
+
+    async def _process_voice_turn(self, guild_id: int, pcm: bytes) -> None:
+        try:
+            transcript = await self._transcribe_voice(pcm)
+            if not transcript or not re.search(r"\brey\b", transcript, re.IGNORECASE):
+                return
+            prompt = self._clean_prompt(transcript)
+            channel = self._voice_text_channels.get(guild_id)
+            if channel is None:
+                return
+            conversation = self._get_conversation(channel.id)
+            local_answer = self._get_build_response(prompt)
+            if local_answer is not None:
+                answer = local_answer
+            else:
+                conversation.append({"role": "user", "content": prompt})
+                answer = await self._generate_response(conversation)
+            answer = self._shorten_answer(self._sanitize_answer(answer))
+            conversation.append({"role": "assistant", "content": answer})
+            self._trim_conversation(channel.id)
+            await self._speak(channel.guild, answer)
+        except (RuntimeError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            logger.warning("Rey no pudo procesar el turno de voz: %s", exc)
 
     async def _speak(self, guild: discord.Guild, text: str) -> None:
         voice_client = discord.utils.get(self.bot.voice_clients, guild=guild)
@@ -457,6 +605,27 @@ class ReyChat(commands.Cog):
 
         prompt = self._clean_prompt(content)
         voice_command = self._is_voice_command(prompt)
+        if voice_command == "listen_leave":
+            self._stop_voice_listener(message.guild.id)
+            await message.channel.send("👑 Rey dejó de escuchar. Sigo dentro del canal de voz.")
+            await self.bot.process_commands(message)
+            return
+        if voice_command == "listen_join":
+            try:
+                await self._join_voice_channel(message.author, receive=True)
+                self._voice_text_channels[message.guild.id] = message.channel
+            except (discord.ClientException, discord.Forbidden, RuntimeError, OSError) as exc:
+                await message.channel.send(f"⚠️ No pude activar la escucha: {exc}")
+            else:
+                await message.channel.send(
+                    "👑 Rey está escuchando. Di 'Rey' seguido de tu pregunta; puedes decir 'Rey deja de escuchar' para apagarlo."
+                )
+                try:
+                    await self._speak(message.guild, "Rey está escuchando.")
+                except (RuntimeError, OSError, aiohttp.ClientError) as exc:
+                    logger.warning("Rey activo, pero no pudo confirmar por voz: %s", exc)
+            await self.bot.process_commands(message)
+            return
         if voice_command == "leave":
             left = await self._leave_voice_channel(message.guild)
             await message.channel.send(
@@ -519,6 +688,25 @@ class ReyChat(commands.Cog):
     @app_commands.describe(prompt="Escribe tu pregunta o mensaje para Rey")
     async def rey(self, interaction: discord.Interaction, prompt: str):
         voice_command = self._is_voice_command(prompt)
+        if voice_command == "listen_leave":
+            self._stop_voice_listener(interaction.guild.id)
+            await interaction.response.send_message("👑 Rey dejó de escuchar. Sigo dentro del canal de voz.")
+            return
+        if voice_command == "listen_join":
+            try:
+                await self._join_voice_channel(interaction.user, receive=True)
+                self._voice_text_channels[interaction.guild.id] = interaction.channel
+            except (discord.ClientException, discord.Forbidden, RuntimeError, OSError) as exc:
+                await interaction.response.send_message(f"⚠️ No pude activar la escucha: {exc}")
+            else:
+                await interaction.response.send_message(
+                    "👑 Rey está escuchando. Di 'Rey' seguido de tu pregunta; puedes decir 'Rey deja de escuchar' para apagarlo."
+                )
+                try:
+                    await self._speak(interaction.guild, "Rey está escuchando.")
+                except (RuntimeError, OSError, aiohttp.ClientError) as exc:
+                    logger.warning("Rey activo, pero no pudo confirmar por voz: %s", exc)
+            return
         if voice_command == "leave":
             left = await self._leave_voice_channel(interaction.guild)
             await interaction.response.send_message(
