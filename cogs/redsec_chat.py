@@ -58,6 +58,7 @@ VOICE_MIN_AUDIO_SECONDS = 0.45
 VOICE_MAX_AUDIO_SECONDS = 8
 VOICE_RMS_THRESHOLD = 450
 GROQ_TRANSCRIPTION_MODEL = "whisper-large-v3-turbo"
+VOICE_WAKE_PATTERN = re.compile(r"\b(?:rey|rei|hey)\b", re.IGNORECASE)
 
 BUILD_RESPONSES = {
     "healer": (
@@ -315,8 +316,11 @@ class ReyChat(commands.Cog):
         try:
             transcript = await self._transcribe_voice(pcm)
             logger.info("Transcripción de voz recibida: %s", transcript or "<vacía>")
-            if not transcript or not re.search(r"\brey\b", transcript, re.IGNORECASE):
+            wake_match = VOICE_WAKE_PATTERN.search(transcript)
+            if not wake_match:
+                logger.info("Turno de voz ignorado: no se detectó la palabra Rey")
                 return
+            transcript = f"Rey{transcript[wake_match.end():]}"
             prompt = self._clean_prompt(transcript)
             channel = self._voice_text_channels.get(guild_id)
             if channel is None:
