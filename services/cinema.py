@@ -20,6 +20,7 @@ class CinemaStream:
                 web.get("/healthz", self._handle_health),
                 web.get("/state", self._handle_state),
                 web.post("/control", self._handle_control),
+                web.post("/presence", self._handle_presence),
             ]
         )
         self._runner: web.AppRunner | None = None
@@ -30,6 +31,7 @@ class CinemaStream:
         self._host_token = secrets.token_urlsafe(24)
         self._position = 0.0
         self._playing = True
+        self._viewers: dict[str, dict[str, str | float]] = {}
         self._lock = asyncio.Lock()
 
     @property
@@ -80,6 +82,7 @@ class CinemaStream:
             self._started_at = time.time()
             self._position = 0.0
             self._playing = True
+            self._viewers.clear()
         logger.info("Cine web iniciado para el video de YouTube %s", video_id)
         return self.public_url or ""
 
@@ -89,6 +92,7 @@ class CinemaStream:
             self._started_at = None
             self._position = 0.0
             self._playing = True
+            self._viewers.clear()
 
     @staticmethod
     def _youtube_video_id(source_url: str) -> str | None:
@@ -120,14 +124,47 @@ class CinemaStream:
             raise web.HTTPUnauthorized(text="Enlace de cine no autorizado.")
         if self._video_id is None or self._started_at is None:
             raise web.HTTPNotFound(text="No hay una transmisión activa.")
+        self._prune_viewers()
         return web.json_response(
             {
                 "video_id": self._video_id,
                 "position": self._current_position(),
                 "playing": self._playing,
                 "server_time": time.time(),
+                "viewers": [
+                    {"name": viewer["name"], "session": session}
+                    for session, viewer in self._viewers.items()
+                ],
             }
         )
+
+    async def _handle_presence(self, request: web.Request) -> web.Response:
+        if not self._is_authorized(request):
+            raise web.HTTPUnauthorized(text="Enlace de cine no autorizado.")
+        if self._video_id is None:
+            raise web.HTTPNotFound(text="No hay una transmisión activa.")
+        try:
+            payload = await request.json()
+            session = str(payload.get("session", "")).strip()
+            name = " ".join(str(payload.get("name", "")).split()).strip()
+        except (TypeError, ValueError):
+            raise web.HTTPBadRequest(text="Presencia de espectador inválida.")
+        if not re.fullmatch(r"[\w-]{8,64}", session) or not name:
+            raise web.HTTPBadRequest(text="Nombre o sesión inválidos.")
+        self._viewers[session] = {
+            "name": name[:24],
+            "last_seen": time.time(),
+        }
+        self._prune_viewers()
+        return web.json_response({"ok": True})
+
+    def _prune_viewers(self) -> None:
+        cutoff = time.time() - 30
+        self._viewers = {
+            session: viewer
+            for session, viewer in self._viewers.items()
+            if float(viewer["last_seen"]) >= cutoff
+        }
 
     async def _handle_control(self, request: web.Request) -> web.Response:
         if not secrets.compare_digest(
@@ -177,19 +214,44 @@ class CinemaStream:
         page = f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Rey Cinema</title>
-<style>body{{margin:0;background:#111;color:#eee;font-family:system-ui}}main{{max-width:1100px;margin:2rem auto;padding:1rem}}#player{{aspect-ratio:16/9;width:100%;background:#000}}p{{color:#bbb}}</style>
+<style>body{{margin:0;background:#111;color:#eee;font-family:system-ui}}main{{max-width:1100px;margin:2rem auto;padding:1rem}}#player{{aspect-ratio:16/9;width:100%;background:#000}}p{{color:#bbb}}#viewers{{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin:.8rem 0}}.viewer{{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:700;border:2px solid #111;box-shadow:0 0 0 1px #777}}#viewer-count{{color:#bbb}}</style>
 </head><body><main><h1>Rey Cinema</h1><div id="player"></div>
+<div id="viewers"><span id="viewer-count">0 espectadores</span></div>
 <p id="status">Sincronizando la transmisión...</p></main>
 <script src="https://www.youtube.com/iframe_api"></script>
 <script>
 const stateUrl = "{state_url}";
+const presenceUrl = "{"/presence?" + urlencode({"token": self._token})}";
 let player;
 let state;
 let ready = false;
 const isHost = new URLSearchParams(location.search).has("host");
+const sessionKey = "rey-cinema-session";
+const session = localStorage.getItem(sessionKey) || crypto.randomUUID().replaceAll("-", "");
+localStorage.setItem(sessionKey, session);
+const name = (prompt("Nombre que aparecerá en el cine:", "Espectador") || "Espectador").trim().slice(0, 24) || "Espectador";
+function updatePresence() {{
+  fetch(presenceUrl, {{method: "POST", headers: {{"Content-Type": "application/json"}},
+    body: JSON.stringify({{session: session, name: name}})}});
+}}
+function renderViewers(viewers) {{
+  const container = document.getElementById("viewers");
+  container.querySelectorAll(".viewer").forEach(element => element.remove());
+  document.getElementById("viewer-count").textContent = `${{viewers.length}} espectador${{viewers.length === 1 ? "" : "es"}}`;
+  viewers.forEach(viewer => {{
+    const bubble = document.createElement("span");
+    bubble.className = "viewer";
+    bubble.title = viewer.name;
+    bubble.textContent = viewer.name.slice(0, 2).toUpperCase();
+    bubble.style.background = `hsl(${{Math.abs([...viewer.name].reduce((sum, char) => sum + char.charCodeAt(0), 0)) % 360}} 65% 45%)`;
+    container.appendChild(bubble);
+  }});
+}}
 function onYouTubeIframeAPIReady() {{
+  updatePresence();
   fetch(stateUrl).then(response => response.json()).then(data => {{
     state = data;
+    renderViewers(data.viewers || []);
     player = new YT.Player("player", {{
       videoId: data.video_id,
       width: "100%",
@@ -227,8 +289,10 @@ if (isHost) {{
   document.querySelector("main").appendChild(controls);
 }}
 setInterval(() => {{
+  updatePresence();
   fetch(stateUrl).then(response => response.json()).then(data => {{
     state = data;
+    renderViewers(data.viewers || []);
     if (ready && !isHost) syncToState();
   }});
 }}, 10000);

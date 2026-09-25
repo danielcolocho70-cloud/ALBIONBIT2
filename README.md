@@ -17,6 +17,7 @@ El comando `/cine` crea una sala web privada en el mismo servicio de Railway:
 - `/cine parar` cierra la sala.
 - Cualquier persona que tenga el enlace puede entrar; no se requiere una cuenta de Discord.
 - Los navegadores nuevos saltan automáticamente a la posición actual para mantener la reproducción sincronizada.
+- Cada espectador elige un nombre y aparece como una burbuja activa; las burbujas se retiran tras 30 segundos sin actividad.
 
 Configura `RAILWAY_PUBLIC_DOMAIN` automáticamente en Railway o define `PUBLIC_BASE_URL` con la URL pública del servicio. El enlace incluye un token temporal generado al arrancar el bot; compártelo solo con quienes deban ver el cine. Este modo usa el reproductor oficial de YouTube y no es un stream Go Live dentro de Discord. El video debe permitir reproducción incrustada; algunos videos pueden bloquearla.
 
