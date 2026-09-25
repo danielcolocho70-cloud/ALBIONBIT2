@@ -37,7 +37,7 @@ class CinemaStream:
             domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
             base_url = f"https://{domain}" if domain else ""
         if not base_url:
-            base_url = "https://albion2-production.up.railway.app"
+            base_url = "https://albionbit2-production.up.railway.app"
         return f"{base_url}/?{urlencode({'token': self._token})}"
 
     async def start_server(self) -> None:
