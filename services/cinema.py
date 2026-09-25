@@ -158,23 +158,30 @@ class CinemaStream:
         self._source_url = None
 
     async def _resolve_media_url(self, source_url: str) -> tuple[str, dict[str, str], str]:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "yt_dlp",
-            "--no-playlist",
-            "--dump-single-json",
-            "--no-warnings",
-            "-f",
-            "best[height<=720]/best",
-            source_url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await process.communicate()
-        if process.returncode != 0:
-            detail = stderr.decode(errors="replace").strip()[-300:]
-            raise RuntimeError(f"No pude obtener el video desde la URL. {detail}")
+        commands = [
+            self._yt_dlp_command(source_url),
+            self._yt_dlp_command(
+                source_url,
+                "--extractor-args",
+                "youtube:player_client=android_vr",
+            ),
+        ]
+        last_detail = ""
+        for command in commands:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+            if process.returncode == 0:
+                break
+            last_detail = stderr.decode(errors="replace").strip()[-500:]
+        else:
+            raise RuntimeError(
+                "No pude obtener el video desde la URL. "
+                f"YouTube solicita autenticación o bloqueó este video: {last_detail}"
+            )
         try:
             metadata = json.loads(stdout.decode(errors="replace"))
         except json.JSONDecodeError as exc:
@@ -187,6 +194,25 @@ class CinemaStream:
             for key, value in (metadata.get("http_headers") or {}).items()
         }
         return media_url, headers, str(metadata.get("title", "")).strip()
+
+    @staticmethod
+    def _yt_dlp_command(source_url: str, *extra_args: str) -> list[str]:
+        command = [
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "--no-playlist",
+            "--dump-single-json",
+            "--no-warnings",
+            "-f",
+            "best[height<=720]/best",
+        ]
+        cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
+        if cookies_file:
+            command.extend(["--cookies", cookies_file])
+        command.extend(extra_args)
+        command.append(source_url)
+        return command
 
     async def _log_process_errors(self, process: asyncio.subprocess.Process) -> None:
         if process.stderr is None:
