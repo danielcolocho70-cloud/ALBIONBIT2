@@ -1,5 +1,6 @@
 # Variables de entorno
 .env
+youtube-cookies.txt
 
 # Bases de datos
 *.db

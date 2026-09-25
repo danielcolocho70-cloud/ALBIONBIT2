@@ -23,7 +23,9 @@ La escucha de voz en tiempo real está desactivada temporalmente (`REY_LISTEN_EN
 ### Autenticación opcional de YouTube para el cine
 
 Algunos videos de YouTube requieren iniciar sesión y no pueden ser extraídos por
-`yt-dlp` sin cookies. Para esos videos, configura `YTDLP_COOKIES_FILE` en Railway
-con la ruta de un archivo Netscape de cookies montado de forma privada. Nunca
-subas ese archivo al repositorio ni lo compartas en Discord. Los videos públicos
-que no requieran autenticación funcionan sin esta variable.
+`yt-dlp` sin cookies. Para Railway, codifica localmente el archivo Netscape
+`youtube-cookies.txt` en Base64 y guarda el resultado como variable secreta
+`YTDLP_COOKIES_B64`. El bot crea un archivo temporal privado dentro del contenedor
+y lo elimina al detener el cine. Nunca subas el archivo ni su contenido al
+repositorio o Discord. Los videos públicos que no requieran autenticación
+funcionan sin esta variable.

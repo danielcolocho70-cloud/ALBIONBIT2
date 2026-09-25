@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import html
 import json
 import logging
@@ -33,6 +34,7 @@ class CinemaStream:
         self._title = "Rey Cinema"
         self._token = secrets.token_urlsafe(24)
         self._lock = asyncio.Lock()
+        self._cookies_file: Path | None = None
 
     @property
     def public_url(self) -> str | None:
@@ -156,6 +158,9 @@ class CinemaStream:
             shutil.rmtree(self._directory, ignore_errors=True)
         self._directory = None
         self._source_url = None
+        if self._cookies_file is not None:
+            self._cookies_file.unlink(missing_ok=True)
+            self._cookies_file = None
 
     async def _resolve_media_url(self, source_url: str) -> tuple[str, dict[str, str], str]:
         commands = [
@@ -195,8 +200,7 @@ class CinemaStream:
         }
         return media_url, headers, str(metadata.get("title", "")).strip()
 
-    @staticmethod
-    def _yt_dlp_command(source_url: str, *extra_args: str) -> list[str]:
+    def _yt_dlp_command(self, source_url: str, *extra_args: str) -> list[str]:
         command = [
             sys.executable,
             "-m",
@@ -210,6 +214,24 @@ class CinemaStream:
         cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
         if cookies_file:
             command.extend(["--cookies", cookies_file])
+        else:
+            cookies_b64 = os.environ.get("YTDLP_COOKIES_B64", "").strip()
+            if cookies_b64:
+                if self._cookies_file is None:
+                    try:
+                        cookie_data = base64.b64decode(cookies_b64, validate=True)
+                    except (ValueError, base64.binascii.Error) as exc:
+                        raise RuntimeError(
+                            "YTDLP_COOKIES_B64 no contiene Base64 válido."
+                        ) from exc
+                    file_descriptor, cookie_path = tempfile.mkstemp(
+                        prefix="rey-youtube-cookies-",
+                        suffix=".txt",
+                    )
+                    os.close(file_descriptor)
+                    self._cookies_file = Path(cookie_path)
+                    self._cookies_file.write_bytes(cookie_data)
+                command.extend(["--cookies", str(self._cookies_file)])
         command.extend(extra_args)
         command.append(source_url)
         return command
