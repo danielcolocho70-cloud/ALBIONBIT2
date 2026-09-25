@@ -6,6 +6,8 @@ import secrets
 import time
 from urllib.parse import parse_qs, urlencode, urlparse
 
+import aiohttp
+
 from aiohttp import web
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,8 @@ class CinemaStream:
                 web.get("/state", self._handle_state),
                 web.post("/control", self._handle_control),
                 web.post("/presence", self._handle_presence),
+                web.get("/login", self._handle_login),
+                web.get("/oauth/callback", self._handle_oauth_callback),
             ]
         )
         self._runner: web.AppRunner | None = None
@@ -32,19 +36,15 @@ class CinemaStream:
         self._position = 0.0
         self._playing = True
         self._viewers: dict[str, dict[str, str | float]] = {}
+        self._oauth_states: dict[str, bool] = {}
+        self._sessions: dict[str, dict[str, str]] = {}
         self._lock = asyncio.Lock()
 
     @property
     def public_url(self) -> str | None:
         if self._video_id is None:
             return None
-        base_url = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
-        if not base_url:
-            domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
-            base_url = f"https://{domain}" if domain else ""
-        if not base_url:
-            base_url = "https://albionbit2-production.up.railway.app"
-        return f"{base_url}/?{urlencode({'token': self._token})}"
+        return f"{self._base_url()}/?{urlencode({'token': self._token})}"
 
     @property
     def organizer_url(self) -> str | None:
@@ -70,6 +70,13 @@ class CinemaStream:
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
+
+    def _base_url(self) -> str:
+        base_url = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+        if not base_url:
+            domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
+            base_url = f"https://{domain}" if domain else ""
+        return base_url or "https://albionbit2-production.up.railway.app"
 
     async def start(self, source_url: str) -> str:
         video_id = self._youtube_video_id(source_url)
@@ -125,6 +132,7 @@ class CinemaStream:
         if self._video_id is None or self._started_at is None:
             raise web.HTTPNotFound(text="No hay una transmisión activa.")
         self._prune_viewers()
+        current_user = self._sessions.get(request.cookies.get("cine_session", ""))
         return web.json_response(
             {
                 "video_id": self._video_id,
@@ -132,11 +140,91 @@ class CinemaStream:
                 "playing": self._playing,
                 "server_time": time.time(),
                 "viewers": [
-                    {"name": viewer["name"], "session": session}
+                    {
+                        "name": viewer["name"],
+                        "avatar": viewer["avatar"],
+                        "user_id": viewer["user_id"],
+                        "role": viewer["role"],
+                        "session": session,
+                    }
                     for session, viewer in self._viewers.items()
                 ],
+                "current_user": current_user,
             }
         )
+
+    async def _handle_login(self, request: web.Request) -> web.Response:
+        client_id = os.environ.get("DISCORD_CLIENT_ID", "").strip()
+        if not client_id:
+            raise web.HTTPServiceUnavailable(
+                text="El inicio con Discord no está configurado."
+            )
+        token = request.query.get("token", "")
+        if not self._is_authorized_token(token):
+            raise web.HTTPUnauthorized(text="Enlace de cine no autorizado.")
+        state = secrets.token_urlsafe(24)
+        self._oauth_states[state] = request.query.get("host", "") == self._host_token
+        redirect_uri = self._oauth_redirect_uri()
+        params = urlencode(
+            {
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "scope": "identify",
+                "state": state,
+            }
+        )
+        return web.HTTPFound(f"https://discord.com/oauth2/authorize?{params}")
+
+    async def _handle_oauth_callback(self, request: web.Request) -> web.Response:
+        state = request.query.get("state", "")
+        is_host = self._oauth_states.pop(state, None)
+        if is_host is None:
+            raise web.HTTPBadRequest(text="Sesión OAuth inválida o expirada.")
+        code = request.query.get("code", "")
+        client_id = os.environ.get("DISCORD_CLIENT_ID", "").strip()
+        client_secret = os.environ.get("DISCORD_CLIENT_SECRET", "").strip()
+        if not code or not client_id or not client_secret:
+            raise web.HTTPServiceUnavailable(text="OAuth de Discord incompleto.")
+        redirect_uri = self._oauth_redirect_uri()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://discord.com/api/oauth2/token",
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                },
+            ) as response:
+                if response.status != 200:
+                    raise web.HTTPBadGateway(text="Discord rechazó la autenticación.")
+                token_data = await response.json()
+            async with session.get(
+                "https://discord.com/api/users/@me",
+                headers={"Authorization": f"Bearer {token_data['access_token']}"},
+            ) as response:
+                if response.status != 200:
+                    raise web.HTTPBadGateway(text="No pude obtener tu perfil de Discord.")
+                profile = await response.json()
+        session_id = secrets.token_urlsafe(24)
+        self._sessions[session_id] = {
+            "user_id": str(profile.get("id", "")),
+            "name": str(profile.get("global_name") or profile.get("username") or "Discord"),
+            "avatar": str(profile.get("avatar") or ""),
+            "role": "Organizador" if is_host else "Espectador",
+        }
+        target = f"/?{urlencode({'token': self._token})}"
+        response = web.HTTPFound(f"{target}&host={self._host_token}" if is_host else target)
+        response.set_cookie("cine_session", session_id, max_age=86400, httponly=True, samesite="Lax", secure=True)
+        return response
+
+    def _oauth_redirect_uri(self) -> str:
+        return f"{self._base_url()}/oauth/callback"
+
+    def _is_authorized_token(self, token: str) -> bool:
+        return secrets.compare_digest(token, self._token)
 
     async def _handle_presence(self, request: web.Request) -> web.Response:
         if not self._is_authorized(request):
@@ -146,13 +234,18 @@ class CinemaStream:
         try:
             payload = await request.json()
             session = str(payload.get("session", "")).strip()
-            name = " ".join(str(payload.get("name", "")).split()).strip()
         except (TypeError, ValueError):
             raise web.HTTPBadRequest(text="Presencia de espectador inválida.")
-        if not re.fullmatch(r"[\w-]{8,64}", session) or not name:
-            raise web.HTTPBadRequest(text="Nombre o sesión inválidos.")
+        if not re.fullmatch(r"[\w-]{8,64}", session):
+            raise web.HTTPBadRequest(text="Sesión inválida.")
+        discord_session = self._sessions.get(request.cookies.get("cine_session", ""))
+        if discord_session is None:
+            raise web.HTTPUnauthorized(text="Inicia sesión con Discord primero.")
         self._viewers[session] = {
-            "name": name[:24],
+            "name": discord_session["name"],
+            "avatar": discord_session["avatar"],
+            "user_id": discord_session["user_id"],
+            "role": discord_session["role"],
             "last_seen": time.time(),
         }
         self._prune_viewers()
@@ -211,11 +304,17 @@ class CinemaStream:
             raise web.HTTPNotFound(text="No hay una transmisión activa.")
         state_url = "/state?" + urlencode({"token": self._token})
         control_url = "/control?" + urlencode({"host": self._host_token})
+        login_url = "/login?" + urlencode(
+            {"token": self._token, "host": self._host_token}
+            if "host" in request.query
+            else {"token": self._token}
+        )
         page = f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Rey Cinema</title>
-<style>body{{margin:0;background:#111;color:#eee;font-family:system-ui}}main{{max-width:1100px;margin:2rem auto;padding:1rem}}#player{{aspect-ratio:16/9;width:100%;background:#000}}p{{color:#bbb}}#viewers{{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin:.8rem 0}}.viewer{{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:700;border:2px solid #111;box-shadow:0 0 0 1px #777}}#viewer-count{{color:#bbb}}</style>
+<style>body{{margin:0;background:#111;color:#eee;font-family:system-ui}}main{{max-width:1100px;margin:2rem auto;padding:1rem}}#player{{aspect-ratio:16/9;width:100%;background:#000}}p{{color:#bbb}}#auth{{margin:.8rem 0}}#auth a{{display:inline-block;padding:.6rem 1rem;border-radius:8px;background:#5865f2;color:#fff;text-decoration:none;font-weight:700}}#viewers{{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin:.8rem 0}}.viewer{{width:40px;height:40px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:700;border:2px solid #111;box-shadow:0 0 0 1px #777;background-size:cover;background-position:center}}</style>
 </head><body><main><h1>Rey Cinema</h1><div id="player"></div>
+<div id="auth"><a id="login" href="{login_url}">Entrar con Discord</a></div>
 <div id="viewers"><span id="viewer-count">0 espectadores</span></div>
 <p id="status">Sincronizando la transmisión...</p></main>
 <script src="https://www.youtube.com/iframe_api"></script>
@@ -229,10 +328,9 @@ const isHost = new URLSearchParams(location.search).has("host");
 const sessionKey = "rey-cinema-session";
 const session = localStorage.getItem(sessionKey) || crypto.randomUUID().replaceAll("-", "");
 localStorage.setItem(sessionKey, session);
-const name = (prompt("Nombre que aparecerá en el cine:", "Espectador") || "Espectador").trim().slice(0, 24) || "Espectador";
 function updatePresence() {{
   fetch(presenceUrl, {{method: "POST", headers: {{"Content-Type": "application/json"}},
-    body: JSON.stringify({{session: session, name: name}})}});
+    body: JSON.stringify({{session: session}})}});
 }}
 function renderViewers(viewers) {{
   const container = document.getElementById("viewers");
@@ -241,16 +339,22 @@ function renderViewers(viewers) {{
   viewers.forEach(viewer => {{
     const bubble = document.createElement("span");
     bubble.className = "viewer";
-    bubble.title = viewer.name;
+    bubble.title = `${{viewer.name}} · ${{viewer.role}}`;
     bubble.textContent = viewer.name.slice(0, 2).toUpperCase();
-    bubble.style.background = `hsl(${{Math.abs([...viewer.name].reduce((sum, char) => sum + char.charCodeAt(0), 0)) % 360}} 65% 45%)`;
+    if (viewer.avatar) bubble.style.backgroundImage = `url(https://cdn.discordapp.com/avatars/${{viewer.user_id}}/${{viewer.avatar}}.png?size=64)`;
+    bubble.style.backgroundColor = `hsl(${{Math.abs([...viewer.name].reduce((sum, char) => sum + char.charCodeAt(0), 0)) % 360}} 65% 45%)`;
     container.appendChild(bubble);
   }});
 }}
 function onYouTubeIframeAPIReady() {{
-  updatePresence();
   fetch(stateUrl).then(response => response.json()).then(data => {{
     state = data;
+    if (!data.current_user) {{
+      document.getElementById("status").textContent = "Inicia sesión con Discord para entrar al cine.";
+      return;
+    }}
+    document.getElementById("auth").innerHTML = `<strong>${{data.current_user.name}}</strong> · ${{data.current_user.role}}`;
+    updatePresence();
     renderViewers(data.viewers || []);
     player = new YT.Player("player", {{
       videoId: data.video_id,

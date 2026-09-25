@@ -15,9 +15,15 @@ El comando `/cine` crea una sala web privada en el mismo servicio de Railway:
 
 - `/cine iniciar <url>` carga el reproductor oficial de YouTube y devuelve un enlace.
 - `/cine parar` cierra la sala.
-- Cualquier persona que tenga el enlace puede entrar; no se requiere una cuenta de Discord.
+- Cualquier persona que tenga el enlace puede entrar iniciando sesión con Discord.
 - Los navegadores nuevos saltan automáticamente a la posición actual para mantener la reproducción sincronizada.
 - Cada espectador elige un nombre y aparece como una burbuja activa; las burbujas se retiran tras 30 segundos sin actividad.
+- Con OAuth de Discord, cada persona aparece con su nombre y avatar reales, y la sala etiqueta al organizador y a los espectadores.
+
+Para activar el inicio con Discord en Railway configura `DISCORD_CLIENT_ID` y
+`DISCORD_CLIENT_SECRET`. En el Developer Portal de Discord añade como Redirect URI:
+`https://albionbit2-production.up.railway.app/oauth/callback`. Sin estas variables,
+el botón de acceso no podrá autenticar a los espectadores.
 
 Configura `RAILWAY_PUBLIC_DOMAIN` automáticamente en Railway o define `PUBLIC_BASE_URL` con la URL pública del servicio. El enlace incluye un token temporal generado al arrancar el bot; compártelo solo con quienes deban ver el cine. Este modo usa el reproductor oficial de YouTube y no es un stream Go Live dentro de Discord. El video debe permitir reproducción incrustada; algunos videos pueden bloquearla.
 
