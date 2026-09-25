@@ -18,4 +18,4 @@ El comando `/cine` crea una transmisión HLS privada en el mismo servicio de Rai
 
 Configura `RAILWAY_PUBLIC_DOMAIN` automáticamente en Railway o define `PUBLIC_BASE_URL` con la URL pública del servicio. El enlace incluye un token temporal generado al arrancar el bot; no compartas ese enlace públicamente. Este modo entrega video real en un reproductor web externo, no un stream Go Live dentro de Discord.
 
-La voz y la escucha de Rey están desactivadas temporalmente. Para reactivarlas, configura `REY_VOICE_ENABLED=true` en Railway y redeploya.
+La escucha de voz en tiempo real está desactivada temporalmente (`REY_LISTEN_ENABLED=false`). Rey sigue entrando al canal y hablando cuando respondes desde el chat. Para reactivar la escucha, configura `REY_LISTEN_ENABLED=true` en Railway y redeploya.

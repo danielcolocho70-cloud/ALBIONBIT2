@@ -23,6 +23,7 @@ from config import (
     GROQ_MODEL,
     GROQ_MODEL_FALLBACKS,
     GROQ_API_URL,
+    REY_LISTEN_ENABLED,
     REY_VOICE_ENABLED,
 )
 from services.cinema import CinemaStream
@@ -157,6 +158,7 @@ class ReyChat(commands.Cog):
         self.TTS_VOICE = "es-CO-GonzaloNeural"
         self.cinema = CinemaStream()
         self.voice_enabled = REY_VOICE_ENABLED
+        self.listen_enabled = REY_LISTEN_ENABLED
 
     async def cog_load(self):
         await self.cinema.start_server()
@@ -184,8 +186,8 @@ class ReyChat(commands.Cog):
         return None
 
     async def _join_voice_channel(self, member: discord.Member, *, receive: bool=False):
-        if not self.voice_enabled:
-            raise RuntimeError("La escucha y la voz de Rey están desactivadas temporalmente.")
+        if receive and not self.listen_enabled:
+            raise RuntimeError("La escucha en tiempo real está desactivada temporalmente.")
         voice_state = getattr(member, "voice", None)
         channel = getattr(voice_state, "channel", None)
         if channel is None:
@@ -333,7 +335,7 @@ class ReyChat(commands.Cog):
         return str(payload.get("text", "")).strip()
 
     async def _process_voice_turn(self, guild_id: int, pcm: bytes) -> None:
-        if not self.voice_enabled:
+        if not self.listen_enabled:
             return
         try:
             transcript = await self._transcribe_voice(pcm)
@@ -699,9 +701,9 @@ class ReyChat(commands.Cog):
 
         prompt = self._clean_prompt(content)
         voice_command = self._is_voice_command(prompt)
-        if voice_command is not None and not self.voice_enabled:
+        if voice_command in {"listen_join"} and not self.listen_enabled:
             await message.channel.send(
-                "🔇 La escucha y la voz de Rey están desactivadas temporalmente."
+                "🔇 La escucha en tiempo real está desactivada temporalmente. Rey seguirá hablando cuando le escribas."
             )
             await self.bot.process_commands(message)
             return
@@ -828,9 +830,9 @@ class ReyChat(commands.Cog):
     @app_commands.describe(prompt="Escribe tu pregunta o mensaje para Rey")
     async def rey(self, interaction: discord.Interaction, prompt: str):
         voice_command = self._is_voice_command(prompt)
-        if voice_command is not None and not self.voice_enabled:
+        if voice_command in {"listen_join"} and not self.listen_enabled:
             await interaction.response.send_message(
-                "🔇 La escucha y la voz de Rey están desactivadas temporalmente.",
+                "🔇 La escucha en tiempo real está desactivada temporalmente. Rey seguirá hablando cuando le escribas.",
                 ephemeral=True,
             )
             return
