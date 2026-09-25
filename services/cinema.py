@@ -19,6 +19,7 @@ class CinemaStream:
                 web.get("/", self._handle_index),
                 web.get("/healthz", self._handle_health),
                 web.get("/state", self._handle_state),
+                web.post("/control", self._handle_control),
             ]
         )
         self._runner: web.AppRunner | None = None
@@ -26,6 +27,9 @@ class CinemaStream:
         self._video_id: str | None = None
         self._started_at: float | None = None
         self._token = secrets.token_urlsafe(24)
+        self._host_token = secrets.token_urlsafe(24)
+        self._position = 0.0
+        self._playing = True
         self._lock = asyncio.Lock()
 
     @property
@@ -39,6 +43,15 @@ class CinemaStream:
         if not base_url:
             base_url = "https://albionbit2-production.up.railway.app"
         return f"{base_url}/?{urlencode({'token': self._token})}"
+
+    @property
+    def organizer_url(self) -> str | None:
+        if self._video_id is None:
+            return None
+        viewer_url = self.public_url
+        if viewer_url is None:
+            return None
+        return f"{viewer_url}&{urlencode({'host': self._host_token})}"
 
     async def start_server(self) -> None:
         if self._runner is not None:
@@ -65,6 +78,8 @@ class CinemaStream:
         async with self._lock:
             self._video_id = video_id
             self._started_at = time.time()
+            self._position = 0.0
+            self._playing = True
         logger.info("Cine web iniciado para el video de YouTube %s", video_id)
         return self.public_url or ""
 
@@ -72,6 +87,8 @@ class CinemaStream:
         async with self._lock:
             self._video_id = None
             self._started_at = None
+            self._position = 0.0
+            self._playing = True
 
     @staticmethod
     def _youtube_video_id(source_url: str) -> str | None:
@@ -106,10 +123,49 @@ class CinemaStream:
         return web.json_response(
             {
                 "video_id": self._video_id,
-                "started_at": self._started_at,
+                "position": self._current_position(),
+                "playing": self._playing,
                 "server_time": time.time(),
             }
         )
+
+    async def _handle_control(self, request: web.Request) -> web.Response:
+        if not secrets.compare_digest(
+            request.query.get("host", ""),
+            self._host_token,
+        ):
+            raise web.HTTPUnauthorized(text="Control de organizador no autorizado.")
+        if self._video_id is None:
+            raise web.HTTPNotFound(text="No hay una transmisión activa.")
+        try:
+            payload = await request.json()
+            action = str(payload.get("action", ""))
+            position = float(payload.get("position", 0))
+        except (ValueError, TypeError):
+            raise web.HTTPBadRequest(text="Control de cine inválido.")
+        if action == "play":
+            self._position = max(0.0, position)
+            self._started_at = time.time() - self._position
+            self._playing = True
+        elif action == "pause":
+            self._position = self._current_position()
+            self._playing = False
+        elif action == "seek":
+            self._position = max(0.0, position)
+            if self._playing:
+                self._started_at = time.time() - self._position
+        elif action == "restart":
+            self._position = 0.0
+            self._started_at = time.time()
+            self._playing = True
+        else:
+            raise web.HTTPBadRequest(text="Acción de cine no reconocida.")
+        return web.json_response({"ok": True})
+
+    def _current_position(self) -> float:
+        if self._playing and self._started_at is not None:
+            return max(0.0, time.time() - self._started_at)
+        return self._position
 
     async def _handle_index(self, request: web.Request) -> web.Response:
         if not self._is_authorized(request):
@@ -117,6 +173,7 @@ class CinemaStream:
         if self._video_id is None:
             raise web.HTTPNotFound(text="No hay una transmisión activa.")
         state_url = "/state?" + urlencode({"token": self._token})
+        control_url = "/control?" + urlencode({"host": self._host_token})
         page = f"""<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
 <title>Rey Cinema</title>
@@ -129,6 +186,7 @@ const stateUrl = "{state_url}";
 let player;
 let state;
 let ready = false;
+const isHost = new URLSearchParams(location.search).has("host");
 function onYouTubeIframeAPIReady() {{
   fetch(stateUrl).then(response => response.json()).then(data => {{
     state = data;
@@ -136,23 +194,43 @@ function onYouTubeIframeAPIReady() {{
       videoId: data.video_id,
       width: "100%",
       height: "100%",
-      playerVars: {{autoplay: 1, controls: 1, playsinline: 1, rel: 0}},
-      events: {{onReady: syncPlayer}}
+      playerVars: {{autoplay: 1, controls: isHost ? 1 : 0, playsinline: 1, rel: 0}},
+      events: {{onReady: syncPlayer, onStateChange: onPlayerStateChange}}
     }});
   }}).catch(() => document.getElementById("status").textContent = "No se pudo cargar la transmisión.");
 }}
 function syncPlayer() {{
   ready = true;
   player.mute();
-  const elapsed = Math.max(0, state.server_time - state.started_at + (Date.now() / 1000 - state.server_time));
-  player.seekTo(elapsed, true);
-  player.playVideo();
-  document.getElementById("status").textContent = "Transmisión sincronizada.";
+  syncToState();
+  document.getElementById("status").textContent = isHost ? "Controles de organizador activos." : "Transmisión sincronizada.";
+}}
+function syncToState() {{
+  const elapsed = state.position;
+  if (Math.abs(player.getCurrentTime() - elapsed) > 2) player.seekTo(elapsed, true);
+  if (state.playing) player.playVideo(); else player.pauseVideo();
+}}
+function onPlayerStateChange(event) {{
+  if (!isHost || !ready) return;
+  if (event.data === YT.PlayerState.PLAYING) sendControl("play");
+  if (event.data === YT.PlayerState.PAUSED) sendControl("pause");
+}}
+function sendControl(action, position = player.getCurrentTime()) {{
+  fetch("{control_url}", {{
+    method: "POST", headers: {{"Content-Type": "application/json"}},
+    body: JSON.stringify({{action: action, position: position}})
+  }});
+}}
+if (isHost) {{
+  const controls = document.createElement("p");
+  controls.innerHTML = '<button onclick="sendControl(\\'play\\')">Reproducir</button> <button onclick="sendControl(\\'pause\\')">Pausar</button> <button onclick="sendControl(\\'seek\\', player.getCurrentTime() + 10)">Adelantar 10 s</button> <button onclick="sendControl(\\'seek\\', Math.max(0, player.getCurrentTime() - 10))">Retroceder 10 s</button> <button onclick="sendControl(\\'restart\\')">Reiniciar</button>';
+  document.querySelector("main").appendChild(controls);
 }}
 setInterval(() => {{
-  if (!ready || !state) return;
-  const elapsed = Math.max(0, state.server_time - state.started_at + (Date.now() / 1000 - state.server_time));
-  if (Math.abs(player.getCurrentTime() - elapsed) > 3) player.seekTo(elapsed, true);
+  fetch(stateUrl).then(response => response.json()).then(data => {{
+    state = data;
+    if (ready && !isHost) syncToState();
+  }});
 }}, 10000);
 </script></body></html>"""
         return web.Response(text=page, content_type="text/html")

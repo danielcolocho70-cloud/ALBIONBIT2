@@ -821,8 +821,11 @@ class ReyChat(commands.Cog):
         except (RuntimeError, ValueError) as exc:
             await interaction.followup.send(f"⚠️ No pude iniciar el cine: {exc}", ephemeral=True)
             return
+        organizer_url = self.cinema.organizer_url
         await interaction.followup.send(
-            f"🎬 Cine iniciado.\nAbre este enlace privado:\n{player_url}"
+            "🎬 Cine iniciado.\n"
+            f"Enlace para espectadores:\n{player_url}\n\n"
+            f"Enlace del organizador (no lo compartas):\n{organizer_url}"
         )
 
     @app_commands.guilds(discord.Object(id=AFK_GUILD_ID))
