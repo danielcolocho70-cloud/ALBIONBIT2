@@ -5,8 +5,7 @@ from discord.ext import commands
 from services.afk_service import AfkService
 
 
-AFK_GUILD_ID = 1337911061868969994
-AFK_CHANNEL_ID = 1529472893438656522
+AFK_GUILD_ID = 1548935954495053854
 AUTHORIZED_ROLE_NAMES = frozenset({"moderador", "staff", "reclutador"})
 
 
@@ -19,9 +18,9 @@ class Afk(commands.GroupCog, group_name="afk", group_description="Registro priva
         self.service = AfkService()
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.guild_id != AFK_GUILD_ID or interaction.channel_id != AFK_CHANNEL_ID:
+        if interaction.guild_id != AFK_GUILD_ID:
             await interaction.response.send_message(
-                "❌ Los comandos AFK solo se pueden usar en el canal configurado.",
+                "❌ Este comando solo se puede usar en el servidor configurado.",
                 ephemeral=True,
             )
             return False
@@ -74,7 +73,7 @@ class Afk(commands.GroupCog, group_name="afk", group_description="Registro priva
             color=0xF39C12,
         )
         embed.set_footer(text=f"Total: {len(records)}")
-        # La lista es pública para que todo el canal AFK conozca las ausencias.
+        # La lista es pública para que el servidor conozca las ausencias.
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="editar", description="Cambiar el estado AFK o la nota de un miembro.")
