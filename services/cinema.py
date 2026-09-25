@@ -1,5 +1,6 @@
 import asyncio
 import html
+import json
 import logging
 import os
 import secrets
@@ -20,6 +21,7 @@ class CinemaStream:
         self._app.add_routes(
             [
                 web.get("/", self._handle_index),
+                web.get("/healthz", self._handle_health),
                 web.get("/stream/{filename}", self._handle_stream_file),
             ]
         )
@@ -74,16 +76,27 @@ class CinemaStream:
             playlist = self._directory / "stream.m3u8"
             output_pattern = self._directory / "segment-%05d.ts"
             try:
-                stream_url = await self._resolve_media_url(source_url)
+                stream_url, input_headers, title = await self._resolve_media_url(source_url)
+                self._title = title or source_url
             except Exception:
                 await self._stop_locked()
                 raise
+            ffmpeg_input_options = []
+            if input_headers:
+                header_lines = [
+                    f"{key}: {value}"
+                    for key, value in input_headers.items()
+                    if key.lower() not in {"host", "content-length"}
+                ]
+                if header_lines:
+                    ffmpeg_input_options = ["-headers", "\r\n".join(header_lines) + "\r\n"]
             command = [
                 "ffmpeg",
                 "-hide_banner",
                 "-loglevel",
                 "warning",
                 "-re",
+                *ffmpeg_input_options,
                 "-i",
                 stream_url,
                 "-map",
@@ -144,13 +157,14 @@ class CinemaStream:
         self._directory = None
         self._source_url = None
 
-    async def _resolve_media_url(self, source_url: str) -> str:
+    async def _resolve_media_url(self, source_url: str) -> tuple[str, dict[str, str], str]:
         process = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
             "yt_dlp",
             "--no-playlist",
-            "--get-url",
+            "--dump-single-json",
+            "--no-warnings",
             "-f",
             "best[height<=720]/best",
             source_url,
@@ -161,10 +175,18 @@ class CinemaStream:
         if process.returncode != 0:
             detail = stderr.decode(errors="replace").strip()[-300:]
             raise RuntimeError(f"No pude obtener el video desde la URL. {detail}")
-        media_url = stdout.decode(errors="replace").strip().splitlines()
+        try:
+            metadata = json.loads(stdout.decode(errors="replace"))
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("yt-dlp no devolvió información válida del video.") from exc
+        media_url = str(metadata.get("url", "")).strip()
         if not media_url:
             raise RuntimeError("La URL no devolvió un flujo de video.")
-        return media_url[0]
+        headers = {
+            str(key): str(value)
+            for key, value in (metadata.get("http_headers") or {}).items()
+        }
+        return media_url, headers, str(metadata.get("title", "")).strip()
 
     async def _log_process_errors(self, process: asyncio.subprocess.Process) -> None:
         if process.stderr is None:
@@ -179,6 +201,9 @@ class CinemaStream:
             request.query.get("token", ""),
             self._token,
         )
+
+    async def _handle_health(self, request: web.Request) -> web.Response:
+        return web.Response(text="ok\n", content_type="text/plain")
 
     async def _handle_index(self, request: web.Request) -> web.Response:
         if not self._is_authorized(request):
