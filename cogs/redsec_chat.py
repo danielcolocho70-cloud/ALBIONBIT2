@@ -19,6 +19,7 @@ from discord.ext import commands, voice_recv
 
 from cogs.afk import AFK_GUILD_ID
 from config import GROQ_API_KEY, GROQ_MODEL, GROQ_MODEL_FALLBACKS, GROQ_API_URL
+from services.cinema import CinemaStream
 
 logger = logging.getLogger(__name__)
 
@@ -148,8 +149,13 @@ class ReyChat(commands.Cog):
         self.api_key = GROQ_API_KEY
         self.session = aiohttp.ClientSession() if self.api_key else None
         self.TTS_VOICE = "es-CO-GonzaloNeural"
+        self.cinema = CinemaStream()
+
+    async def cog_load(self):
+        await self.cinema.start_server()
 
     def cog_unload(self):
+        asyncio.create_task(self.cinema.stop_server())
         if self.session is not None and not self.session.closed:
             asyncio.create_task(self.session.close())
         for voice_client in self.bot.voice_clients:
@@ -760,6 +766,43 @@ class ReyChat(commands.Cog):
             except (discord.ClientException, discord.Forbidden, RuntimeError, OSError) as exc:
                 logger.warning("Rey no pudo hablar en voz: %s", exc)
         await self.bot.process_commands(message)
+
+    @app_commands.guilds(discord.Object(id=AFK_GUILD_ID))
+    @app_commands.command(name="cine", description="Inicia o detiene un cine privado externo")
+    @app_commands.describe(
+        accion="Acción del cine",
+        url="URL del video cuando uses iniciar",
+    )
+    @app_commands.choices(
+        accion=[
+            app_commands.Choice(name="Iniciar", value="iniciar"),
+            app_commands.Choice(name="Parar", value="parar"),
+        ]
+    )
+    async def cine(
+        self,
+        interaction: discord.Interaction,
+        accion: app_commands.Choice[str],
+        url: str | None = None,
+    ):
+        if accion.value == "parar":
+            await self.cinema.stop()
+            await interaction.response.send_message("🎬 Cine detenido.")
+            return
+        if not url:
+            await interaction.response.send_message(
+                "⚠️ Debes proporcionar la URL del video.", ephemeral=True
+            )
+            return
+        await interaction.response.defer()
+        try:
+            player_url = await self.cinema.start(url)
+        except (RuntimeError, ValueError) as exc:
+            await interaction.followup.send(f"⚠️ No pude iniciar el cine: {exc}", ephemeral=True)
+            return
+        await interaction.followup.send(
+            f"🎬 Cine iniciado.\nAbre este enlace privado:\n{player_url}"
+        )
 
     @app_commands.guilds(discord.Object(id=AFK_GUILD_ID))
     @app_commands.command(name="rey", description="Habla con Rey, el asistente del clan")
