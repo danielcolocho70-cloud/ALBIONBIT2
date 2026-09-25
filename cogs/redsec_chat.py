@@ -187,7 +187,7 @@ class ReyChat(commands.Cog):
 
     async def _join_voice_channel(self, member: discord.Member, *, receive: bool=False):
         if receive and not self.listen_enabled:
-            raise RuntimeError("La escucha en tiempo real está desactivada temporalmente.")
+            receive = False
         voice_state = getattr(member, "voice", None)
         channel = getattr(voice_state, "channel", None)
         if channel is None:
