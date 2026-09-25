@@ -18,7 +18,13 @@ from discord import app_commands
 from discord.ext import commands, voice_recv
 
 from cogs.afk import AFK_GUILD_ID
-from config import GROQ_API_KEY, GROQ_MODEL, GROQ_MODEL_FALLBACKS, GROQ_API_URL
+from config import (
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    GROQ_MODEL_FALLBACKS,
+    GROQ_API_URL,
+    REY_VOICE_ENABLED,
+)
 from services.cinema import CinemaStream
 
 logger = logging.getLogger(__name__)
@@ -150,6 +156,7 @@ class ReyChat(commands.Cog):
         self.session = aiohttp.ClientSession() if self.api_key else None
         self.TTS_VOICE = "es-CO-GonzaloNeural"
         self.cinema = CinemaStream()
+        self.voice_enabled = REY_VOICE_ENABLED
 
     async def cog_load(self):
         await self.cinema.start_server()
@@ -177,6 +184,8 @@ class ReyChat(commands.Cog):
         return None
 
     async def _join_voice_channel(self, member: discord.Member, *, receive: bool=False):
+        if not self.voice_enabled:
+            raise RuntimeError("La escucha y la voz de Rey están desactivadas temporalmente.")
         voice_state = getattr(member, "voice", None)
         channel = getattr(voice_state, "channel", None)
         if channel is None:
@@ -324,6 +333,8 @@ class ReyChat(commands.Cog):
         return str(payload.get("text", "")).strip()
 
     async def _process_voice_turn(self, guild_id: int, pcm: bytes) -> None:
+        if not self.voice_enabled:
+            return
         try:
             transcript = await self._transcribe_voice(pcm)
             logger.info("Transcripción de voz recibida: %s", transcript or "<vacía>")
@@ -359,6 +370,8 @@ class ReyChat(commands.Cog):
             logger.exception("Error inesperado procesando un turno de voz de Rey")
 
     async def _speak(self, guild: discord.Guild, text: str) -> None:
+        if not self.voice_enabled:
+            return
         voice_client = discord.utils.get(self.bot.voice_clients, guild=guild)
         if voice_client is None or not voice_client.is_connected():
             return
@@ -686,6 +699,12 @@ class ReyChat(commands.Cog):
 
         prompt = self._clean_prompt(content)
         voice_command = self._is_voice_command(prompt)
+        if voice_command is not None and not self.voice_enabled:
+            await message.channel.send(
+                "🔇 La escucha y la voz de Rey están desactivadas temporalmente."
+            )
+            await self.bot.process_commands(message)
+            return
         if voice_command == "listen_leave":
             self._stop_voice_listener(message.guild.id)
             await message.channel.send("👑 Rey dejó de escuchar. Sigo dentro del canal de voz.")
@@ -759,7 +778,7 @@ class ReyChat(commands.Cog):
         self._trim_conversation(message.channel.id)
 
         await self._send_long_message(message.channel, answer)
-        if message.guild is not None and getattr(message.author, "voice", None):
+        if self.voice_enabled and message.guild is not None and getattr(message.author, "voice", None):
             try:
                 await self._join_voice_channel(message.author)
                 await self._speak(message.guild, answer)
@@ -809,6 +828,12 @@ class ReyChat(commands.Cog):
     @app_commands.describe(prompt="Escribe tu pregunta o mensaje para Rey")
     async def rey(self, interaction: discord.Interaction, prompt: str):
         voice_command = self._is_voice_command(prompt)
+        if voice_command is not None and not self.voice_enabled:
+            await interaction.response.send_message(
+                "🔇 La escucha y la voz de Rey están desactivadas temporalmente.",
+                ephemeral=True,
+            )
+            return
         if voice_command == "listen_leave":
             self._stop_voice_listener(interaction.guild.id)
             await interaction.response.send_message("👑 Rey dejó de escuchar. Sigo dentro del canal de voz.")
@@ -888,7 +913,7 @@ class ReyChat(commands.Cog):
         conversation.append({"role": "assistant", "content": answer})
         self._trim_conversation(interaction.channel.id)
         await self._send_long_message(interaction, answer)
-        if interaction.guild is not None and getattr(interaction.user, "voice", None):
+        if self.voice_enabled and interaction.guild is not None and getattr(interaction.user, "voice", None):
             try:
                 await self._join_voice_channel(interaction.user)
                 await self._speak(interaction.guild, answer)

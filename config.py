@@ -22,3 +22,9 @@ GROQ_API_URL = os.environ.get(
     "GROQ_API_URL",
     "https://api.groq.com/openai/v1/chat/completions",
 ).strip()
+REY_VOICE_ENABLED = os.environ.get("REY_VOICE_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}

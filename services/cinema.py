@@ -41,7 +41,7 @@ class CinemaStream:
             domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "").strip()
             base_url = f"https://{domain}" if domain else ""
         if not base_url:
-            return None
+            base_url = "https://albion2-production.up.railway.app"
         return f"{base_url}/?{urlencode({'token': self._token})}"
 
     async def start_server(self) -> None:
@@ -66,11 +66,6 @@ class CinemaStream:
             raise ValueError("La URL debe comenzar con http:// o https://.")
         if shutil.which("ffmpeg") is None:
             raise RuntimeError("No se encontró FFmpeg en el servidor.")
-        if self.public_url is None:
-            raise RuntimeError(
-                "Falta PUBLIC_BASE_URL o RAILWAY_PUBLIC_DOMAIN para publicar el cine."
-            )
-
         async with self._lock:
             await self._stop_locked()
             self._directory = Path(tempfile.mkdtemp(prefix="rey-cinema-"))
